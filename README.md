@@ -90,7 +90,15 @@ Every request is authenticated with an [ElevenLabs API key](https://elevenlabs.i
 export ELEVENLABS_API_KEY=xi-...
 ```
 
-A `.env` file in the working directory is loaded automatically, so putting `ELEVENLABS_API_KEY=xi-...` there works too — handy for keeping a key scoped to one project.
+A `.env` or `.env.local` file in the working directory is loaded automatically, so putting `ELEVENLABS_API_KEY=xi-...` there works too — handy for keeping a key scoped to one project.
+
+To get a key into a project without copying anything by hand, run:
+
+```bash
+elevenlabs onboard --product text-to-speech
+```
+
+It signs you in (or creates an account) in the browser; the approval page creates a key scoped to the product you name and hands it to the CLI, which writes it to `.env.local`, adds that file to `.gitignore`, and never prints it. Pass `--env-file` to use another file, omit `--product` for a key with the default permissions, and run `elevenlabs onboard status` to check what a project has. Both print JSON when piped, for coding agents.
 
 For a one-off call, pass it per command instead:
 
