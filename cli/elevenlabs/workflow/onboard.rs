@@ -663,19 +663,6 @@ struct Plan {
     authorize_url: String,
 }
 
-impl Plan {
-    /// How the key travels from the page to this process. Without a browser
-    /// of its own the page must not copy automatically: the browser may be on
-    /// another machine, so it shows a Copy key button and where to paste.
-    fn handoff(&self) -> &'static str {
-        if self.no_browser {
-            "manual"
-        } else {
-            "clipboard"
-        }
-    }
-}
-
 fn plan(matches: &clap::ArgMatches) -> Result<Plan, CliError> {
     let env_display =
         opt_string(matches, "env-file").unwrap_or_else(|| DEFAULT_ENV_FILE.to_string());
@@ -708,18 +695,19 @@ fn plan(matches: &clap::ArgMatches) -> Result<Plan, CliError> {
     })
 }
 
-/// The sign-in `auth login` runs, plus what the approval page needs to know.
-fn sign_in_flow(plan: &Plan, token_url: &str) -> PkceLoginFlow {
-    let mut params = vec![
-        ("key_handoff".to_string(), plan.handoff().to_string()),
-        (
-            "cli_version".to_string(),
-            env!("CARGO_PKG_VERSION").to_string(),
-        ),
-    ];
+/// What the approval page needs to know beyond the sign-in itself:
+/// `key_handoff` asks it to create a key and copy it, `product` scopes it.
+fn handoff_params(plan: &Plan) -> Vec<(String, String)> {
+    let mut params = vec![("key_handoff".to_string(), "clipboard".to_string())];
     if let Some(product) = &plan.product {
         params.push(("product".to_string(), product.clone()));
     }
+    params
+}
+
+/// The sign-in `auth login` runs, plus the approval page's parameters.
+fn sign_in_flow(plan: &Plan, token_url: &str) -> PkceLoginFlow {
+    let params = handoff_params(plan);
     PkceLoginFlow::new(SCHEME)
         .client_id(CLIENT_ID)
         .authorization_url(&plan.authorize_url)
@@ -906,9 +894,59 @@ fn describe_sign_in_error(error: CliError) -> CliError {
     }
 }
 
+// ── Where the browser is ─────────────────────────────────────────────
+
+/// Whether a browser this process can open would land on this machine, so
+/// its redirect and its clipboard reach us. False over SSH, inside a
+/// container or a cloud agent, and on a Linux box with no display; true on
+/// macOS and Windows, and on Linux with a display or under WSL, where the
+/// Windows browser and clipboard are bridged in.
+fn browser_reachable_in(
+    os: &str,
+    var: &dyn Fn(&str) -> Option<String>,
+    in_container: bool,
+) -> bool {
+    let set = |name: &str| var(name).is_some_and(|v| !v.trim().is_empty());
+    if set("SSH_CONNECTION") || set("SSH_TTY") || set("SSH_CLIENT") {
+        return false;
+    }
+    if in_container || set("CODESPACES") || set("REMOTE_CONTAINERS") {
+        return false;
+    }
+    match os {
+        "linux" => set("WSL_DISTRO_NAME") || set("DISPLAY") || set("WAYLAND_DISPLAY"),
+        _ => true,
+    }
+}
+
+fn in_container() -> bool {
+    Path::new("/.dockerenv").exists()
+        || std::fs::read_to_string("/proc/1/cgroup")
+            .map(|c| c.contains("docker") || c.contains("containerd") || c.contains("kubepods"))
+            .unwrap_or(false)
+}
+
+fn browser_reachable() -> bool {
+    browser_reachable_in(
+        std::env::consts::OS,
+        &|name| std::env::var(name).ok(),
+        in_container(),
+    )
+}
+
+const NO_BROWSER_HERE: &str = "\
+No browser can reach this machine (an SSH session, a container or a cloud agent), so the \
+approval page cannot hand a key to this command. Create a key at \
+https://elevenlabs.io/app/settings/api-keys and expose it as ELEVENLABS_API_KEY the way you \
+manage secrets here, then run `elevenlabs onboard status`. If your browser does reach this \
+machine (for example through port forwarding), pass --no-browser to open the link yourself.";
+
 fn handle_onboard(matches: &clap::ArgMatches, ctx: &AppContext) -> Result<(), CliError> {
     let _scope = api::command_scope("onboard");
     let plan = plan(matches)?;
+    if !plan.no_browser && !browser_reachable() {
+        return Err(CliError::Validation(NO_BROWSER_HERE.to_string()));
+    }
     let existing = read_env_file(&plan.env_file, &plan.env_display)?;
     let contents = existing.as_deref().unwrap_or("");
 
@@ -999,8 +1037,10 @@ fn handle_status(matches: &clap::ArgMatches, ctx: &AppContext) -> Result<(), Cli
             .map(|account| account.is_some()),
         None => None,
     };
+    let browser = browser_reachable();
     let facts = json!({
         "signed_in": signed_in(),
+        "browser_reachable": browser,
         "env_file": env_display,
         "env_file_exists": existing.is_some(),
         "api_key_present": key.is_some(),
@@ -1026,6 +1066,14 @@ fn handle_status(matches: &clap::ArgMatches, ctx: &AppContext) -> Result<(), Cli
     };
     let prose = [
         format!("Signed in:        {}", yes_no(facts["signed_in"].as_bool())),
+        format!(
+            "Browser:          {}",
+            if browser {
+                "can reach this machine"
+            } else {
+                "cannot reach this machine (remote)"
+            }
+        ),
         format!(
             "Env file:         {env_display}{}",
             if existing.is_some() { "" } else { " (missing)" }
@@ -1124,7 +1172,7 @@ fn onboard_command() -> clap::Command {
             clap::Arg::new("no-browser")
                 .long("no-browser")
                 .action(clap::ArgAction::SetTrue)
-                .help("Print the sign-in URL instead of opening a browser; the key is then copied by hand"),
+                .help("Print the sign-in URL instead of opening a browser (also skips the remote-machine check)"),
         )
         .arg(
             clap::Arg::new("replace")
@@ -1141,7 +1189,7 @@ fn onboard_command() -> clap::Command {
         )
         .subcommand(
             clap::Command::new("status")
-                .about("Report whether this project is signed in and has a working API key")
+                .about("Report whether this project is signed in, has a working API key, and can reach a browser")
                 .arg(env_file_arg()),
         )
 }
@@ -1581,11 +1629,39 @@ mod tests {
     }
 
     #[test]
-    fn the_handoff_is_manual_without_a_browser() {
+    fn the_page_is_asked_for_a_clipboard_handoff_and_nothing_else() {
         let mut plan = plan_in(Path::new("."));
-        assert_eq!(plan.handoff(), "clipboard");
+        plan.product = None;
+        assert_eq!(
+            handoff_params(&plan),
+            vec![("key_handoff".to_string(), "clipboard".to_string())]
+        );
+        plan.product = Some("music".into());
         plan.no_browser = true;
-        assert_eq!(plan.handoff(), "manual");
+        let params = handoff_params(&plan);
+        assert_eq!(
+            params[0].1, "clipboard",
+            "--no-browser changes nothing here"
+        );
+        assert_eq!(params[1], ("product".to_string(), "music".to_string()));
+        assert!(params.iter().all(|(k, _)| k != "cli_version"));
+    }
+
+    #[test]
+    fn a_browser_reaches_a_laptop_but_not_a_remote_box() {
+        let none = |_: &str| None;
+        let ssh = |name: &str| (name == "SSH_CONNECTION").then(|| "1.2.3.4 22".to_string());
+        let display = |name: &str| (name == "DISPLAY").then(|| ":0".to_string());
+        let wsl = |name: &str| (name == "WSL_DISTRO_NAME").then(|| "Ubuntu".to_string());
+        let codespace = |name: &str| (name == "CODESPACES").then(|| "true".to_string());
+        assert!(browser_reachable_in("macos", &none, false));
+        assert!(browser_reachable_in("windows", &none, false));
+        assert!(!browser_reachable_in("macos", &ssh, false));
+        assert!(!browser_reachable_in("linux", &none, false), "no display");
+        assert!(browser_reachable_in("linux", &display, false));
+        assert!(browser_reachable_in("linux", &wsl, false));
+        assert!(!browser_reachable_in("linux", &display, true), "container");
+        assert!(!browser_reachable_in("linux", &codespace, false));
     }
 
     #[test]

@@ -98,7 +98,7 @@ To get a key into a project without copying anything by hand, run:
 elevenlabs onboard --product text-to-speech
 ```
 
-It signs you in (or creates an account) in the browser; the approval page creates a key scoped to the product you name and hands it to the CLI, which writes it to `.env.local`, adds that file to `.gitignore`, and never prints it. Pass `--env-file` to use another file, omit `--product` for a key with the default permissions, and run `elevenlabs onboard status` to check what a project has. Both print JSON when piped, for coding agents.
+It signs you in (or creates an account) in the browser; the approval page creates a key scoped to the product you name and hands it to the CLI, which writes it to `.env.local`, adds that file to `.gitignore`, and never prints it. Pass `--env-file` to use another file, omit `--product` for a key with the default permissions, and run `elevenlabs onboard status` to check what a project has. Both print JSON when piped, for coding agents. Over SSH, in a container, or in a cloud agent there is no browser that can reach the CLI, so `onboard` stops and points you at the API keys page instead; `onboard status` reports this as `browser_reachable: false`.
 
 For a one-off call, pass it per command instead:
 

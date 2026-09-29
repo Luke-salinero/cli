@@ -56,6 +56,10 @@ async fn status_with_nothing_configured_reports_that_and_exits_zero() {
 
     let facts = json_stdout(&out);
     assert_eq!(facts["signed_in"], false);
+    assert!(
+        facts["browser_reachable"].is_boolean(),
+        "the skill branches on this before opening anything"
+    );
     assert_eq!(facts["env_file"], ".env.local");
     assert_eq!(facts["env_file_exists"], false);
     assert_eq!(facts["api_key_present"], false);
@@ -283,6 +287,46 @@ async fn env_local_wins_over_env_for_the_key() {
 }
 
 // ── refusals before any browser opens ───────────────────────────────
+
+#[tokio::test]
+async fn a_remote_session_is_sent_to_the_api_keys_page_instead() {
+    let server = MockServer::start().await;
+    let (home, cwd) = temp();
+
+    let out = cli(
+        home.path(),
+        cwd.path(),
+        &server.uri(),
+        &["onboard", "--product", "text-to-speech"],
+    )
+    .env("SSH_CONNECTION", "10.0.0.2 51000 10.0.0.1 22")
+    .output()
+    .unwrap();
+
+    assert!(!out.status.success());
+    // Piped, the refusal is the JSON error on stdout, like every other error.
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("No browser can reach this machine"), "{text}");
+    assert!(text.contains("api-keys"), "{text}");
+    assert!(text.contains("--no-browser"), "{text}");
+    assert!(!cwd.path().join(".env.local").exists(), "nothing written");
+    assert_eq!(server.received_requests().await.unwrap().len(), 0);
+
+    let status = cli(
+        home.path(),
+        cwd.path(),
+        &server.uri(),
+        &["onboard", "status"],
+    )
+    .env("SSH_CONNECTION", "10.0.0.2 51000 10.0.0.1 22")
+    .output()
+    .unwrap();
+    assert_eq!(json_stdout(&status)["browser_reachable"], false);
+}
 
 #[tokio::test]
 async fn an_unknown_product_is_refused() {
