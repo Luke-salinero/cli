@@ -120,6 +120,11 @@ const GITIGNORE_NOTE: &str = "# Local secrets written by `elevenlabs onboard`\n"
 const PLACEHOLDER_NOTE: &str =
     "# Paste your ElevenLabs API key below. Click \"Copy key\" on the approval page, or \
      create one at https://elevenlabs.io/app/settings/api-keys. Never paste it into a chat.";
+/// For an account that cannot create keys this way there is no Copy key
+/// button to point at, so the note names what will work instead.
+const LEGACY_PLACEHOLDER_NOTE: &str = "# Paste your ElevenLabs API key below. Create one at \
+     https://elevenlabs.io/app/settings/api-keys, or ask a workspace administrator for one. \
+     Never paste it into a chat.";
 
 /// What the run ended with, in the words the skill branches on.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -335,7 +340,7 @@ fn with_key(contents: &str, key: &str) -> String {
 /// The placeholder for a key that has to be pasted by hand: an empty
 /// assignment under a note saying where the key comes from. Idempotent, so a
 /// second failed run does not stack notes.
-fn with_placeholder(contents: &str) -> String {
+fn with_placeholder(contents: &str, note: &str) -> String {
     if file_key(contents).is_some() {
         return contents.to_string();
     }
@@ -348,7 +353,7 @@ fn with_placeholder(contents: &str) -> String {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push_str(newline);
     }
-    out.push_str(PLACEHOLDER_NOTE);
+    out.push_str(note);
     out.push_str(newline);
     out.push_str(API_KEY_ENV);
     out.push('=');
@@ -866,7 +871,11 @@ fn finish(
     if report.key_status != KeyStatus::Created {
         match file_key(contents) {
             None => {
-                probe.write(&plan.env_display, &with_placeholder(contents))?;
+                let note = match report.key_status {
+                    KeyStatus::NotAvailable | KeyStatus::NotPermitted => LEGACY_PLACEHOLDER_NOTE,
+                    _ => PLACEHOLDER_NOTE,
+                };
+                probe.write(&plan.env_display, &with_placeholder(contents, note))?;
                 report.env_file_written = true;
                 report.placeholder_written = true;
             }
@@ -1378,11 +1387,11 @@ mod tests {
 
     #[test]
     fn a_placeholder_is_added_once_and_replaced_by_a_real_key() {
-        let once = with_placeholder("A=1\n");
+        let once = with_placeholder("A=1\n", PLACEHOLDER_NOTE);
         assert!(once.ends_with("ELEVENLABS_API_KEY=\n"));
         assert!(once.contains(PLACEHOLDER_NOTE));
         assert_eq!(
-            with_placeholder(&once),
+            with_placeholder(&once, PLACEHOLDER_NOTE),
             once,
             "a second run must not stack notes"
         );
@@ -1562,13 +1571,18 @@ mod tests {
         assert_eq!(report.key_status, KeyStatus::NotPermitted);
         assert_eq!(report.json()["next"], "legacy");
         assert!(clipboard.cleared, "the note is ours to clean up");
+        let written = std::fs::read_to_string(&plan.env_file).unwrap();
+        assert!(
+            written.contains("workspace administrator") && !written.contains("Copy key"),
+            "the legacy placeholder must not point at a button that is not there: {written}"
+        );
     }
 
     #[test]
     fn an_existing_placeholder_is_not_duplicated_when_nothing_arrives() {
         let dir = tempfile::tempdir().unwrap();
         let plan = plan_in(dir.path());
-        let existing = with_placeholder("");
+        let existing = with_placeholder("", PLACEHOLDER_NOTE);
         let mut clipboard = FakeClipboard {
             text: None,
             cleared: false,
